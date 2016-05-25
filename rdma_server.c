@@ -21,9 +21,10 @@ static struct ibv_qp_init_attr qp_init_attr;
 static struct ibv_qp *client_qp = NULL;
 /* RDMA memory resources */
 static struct ibv_mr *client_metadata_mr = NULL, *server_buffer_mr = NULL, *server_metadata_mr = NULL;
-static struct rdma_buffer_attr client_metadata_attr;
+static struct rdma_buffer_attr client_metadata_attr, server_metadata_attr;
 static struct ibv_recv_wr client_recv_wr, *bad_client_recv_wr = NULL;
-static struct ibv_sge client_recv_sge;
+static struct ibv_send_wr server_send_wr, *bad_server_send_wr = NULL;
+static struct ibv_sge client_recv_sge, server_send_sge;
 
 /* When we call this function cm_client_id must be set to a valid identifier.
  * This is where, we prepare client connection before we accept it. This 
@@ -294,9 +295,61 @@ static int send_server_metadata_to_client()
 	printf("The client has requested buffer length of : %u bytes \n", 
 			client_metadata_attr.length);
 
-	rdma_error("This function is not yet implemented \n");
-	/* IMPLEMENT THIS FUNCTION */
-       return -ENOSYS;
+
+	////////////////////////////////////
+	// OWN IMPLEMENTATION STARTS HERE //
+	////////////////////////////////////
+
+	// This allocates the buffer
+	server_buffer_mr = rdma_buffer_alloc(pd, client_metadata_attr.length,
+				(IBV_ACCESS_LOCAL_WRITE|
+				 IBV_ACCESS_REMOTE_READ|
+				 IBV_ACCESS_REMOTE_WRITE));
+
+	// The following code is adapted from client_send_metadata_to_server() in rdma_client.c
+	server_metadata_attr.address = (uint64_t)server_buffer_mr->addr;
+	server_metadata_attr.length = server_buffer_mr->length;
+	server_metadata_attr.stag.local_stag = server_buffer_mr->lkey;
+	/* now we register the metadata memory */
+	server_metadata_mr = rdma_buffer_register(pd, 
+			&server_metadata_attr, 
+			sizeof(server_metadata_attr), 
+			IBV_ACCESS_LOCAL_WRITE);
+
+	/* now we fill up SGE */
+	server_send_sge.addr = (uint64_t) server_metadata_mr->addr;
+	server_send_sge.length = (uint32_t) server_metadata_mr->length;
+	server_send_sge.lkey = server_metadata_mr->lkey;
+	/* now we link to the send work request */
+	bzero(&server_send_wr, sizeof(server_send_wr));
+	server_send_wr.sg_list = &server_send_sge;
+	server_send_wr.num_sge = 1;
+	server_send_wr.opcode = IBV_WR_SEND;
+	server_send_wr.send_flags = IBV_SEND_SIGNALED;
+
+	// Send metadata to client
+	ret = ibv_post_send(client_qp, 
+			&server_send_wr,
+			&bad_server_send_wr);
+	if (ret) {
+		rdma_error("Failed to send server metadata, errno: %d \n", -errno);
+		return -errno;
+	}
+
+	// Instead of 2 work completions as in client code, i think we expect only one here
+	ret = process_work_completion_events(io_completion_channel, &wc, 1);
+	if(ret != 1) {
+		rdma_error("We failed to get 1 work completion , ret = %d \n",
+				ret);
+		return ret;
+	}
+
+	printf("Finished sending metadata...\n");
+	return 0;
+
+	//////////////////////////////////
+	// OWN IMPLEMENTATION ENDS HERE //
+	//////////////////////////////////
 }
 
 /* This is server side logic. Server passively waits for the client to call 
