@@ -307,47 +307,94 @@ static int client_send_metadata_to_server()
  */ 
 static int client_remote_memory_ops() 
 {
+    struct ibv_wc wc;
+    int ret = -1;
+
+    debug("Sending write request.\n");
+
+    // Setup the source sge used to write our data to the remote buffer.
+    // This sge specifies the location of the data within our local buffer.
     client_send_sge.length  = client_src_mr->length;
     client_send_sge.lkey    = client_src_mr->lkey;
     client_send_sge.addr    = (uint64_t)client_src_mr->addr;
 
+    // Setup the work request. We want to write to the remote buffer and receive
+    // a work completion signal when done. The location within the remote buffer is
+    // set using the server metadata by assigning to the remote address and remote key fields
+    // of the work request.
     bzero(&client_send_wr, sizeof(client_send_wr));
     client_send_wr.num_sge             = 1;
     client_send_wr.sg_list             = &client_send_sge;
     client_send_wr.opcode              = IBV_WR_RDMA_WRITE;
+    client_send_wr.send_flags          = IBV_SEND_SIGNALED;
     client_send_wr.wr.rdma.remote_addr = server_metadata_attr.address;
     client_send_wr.wr.rdma.rkey        = server_metadata_attr.stag.local_stag;
 
-    int fail = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
-    if(fail) {
+    // Post the write request and catch bad work requests if there are any.
+    ret = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
+    if(ret) {
         rdma_error("RDMA Write failed.\n");
-        return -fail;
+        return ret;
     }
 
-    client_dst_mr = rdma_buffer_register(pd, dst, strlen(src), IBV_ACCESS_LOCAL_WRITE);
+    // Wait for a work completion event to make sure our data has actually
+    // been written to the remote buffer before we read it again.
+    ret = process_work_completion_events(io_completion_channel, &wc, 1);
+    if(ret != 1) {
+        rdma_error("Failed to get a work completion. ret =  %d\n", ret);
+        return ret;
+    }
+
+    debug("Write request sent.\n");
+
+    client_dst_mr = rdma_buffer_register(
+        pd, 
+        dst, 
+        strlen(src), 
+        IBV_ACCESS_LOCAL_WRITE);
+
     if(!client_dst_mr) {
-        rdma_error("Could not register destination buffer.\n");
-        return -1;
+        rdma_error("Could not register destination buffer. errno = %d\n", -errno);
+        return -errno;
     }
 
+    debug("Sending read request.\n");
+
+    // Setup the destination sge used to write the remote data into our local buffer.
+    // This sge specifies the target location of the data within our local buffer.
     client_send_sge.length  = client_dst_mr->length;
     client_send_sge.lkey    = client_dst_mr->lkey;
     client_send_sge.addr    = (uint64_t)client_dst_mr->addr;
 
+    // Setup the work request. We want to read from the remote buffer and receive a
+    // work completion signal when done. The location within the remote buffer is set
+    // using the server metadata by assigning to the remote address and remote key fields
+    // of the work request.
     bzero(&client_send_wr, sizeof(client_send_wr));
     client_send_wr.num_sge             = 1;
     client_send_wr.sg_list             = &client_send_sge;
     client_send_wr.opcode              = IBV_WR_RDMA_READ;
+    client_send_wr.send_flags          = IBV_SEND_SIGNALED;
     client_send_wr.wr.rdma.remote_addr = server_metadata_attr.address;
     client_send_wr.wr.rdma.rkey        = server_metadata_attr.stag.local_stag;
 
-    fail = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
-    if(fail) {
-        rdma_error("RDMA Read failed.\n");
-        return -fail;
+    // Post the read request and catch bad work requests if there are any.
+    ret = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
+    if(ret) {
+        rdma_error("RDMA Read failed. errno = %d\n", -errno);
+        return -errno;
     }
 
-    debug("Dst: %s\n", dst);
+    // Wait for a work completion event to make sure our data has actually
+    // been read from the remote buffer before we continue.
+    ret = process_work_completion_events(io_completion_channel, &wc, 1);
+    if(ret != 1) {
+        rdma_error("Failed to get a work completion.  ret = %d\n", ret);
+        return ret;
+    }
+
+    debug("Read request sent. Dst: %s\n", dst);
+
     return 0;
 }
 

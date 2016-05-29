@@ -336,6 +336,8 @@ static int send_server_metadata_to_client()
 		return -errno;
 	}
 
+	debug("Waiting for work to complete.\n");
+
 	// Instead of 2 work completions as in client code, i think we expect only one here
 	ret = process_work_completion_events(io_completion_channel, &wc, 1);
 	if(ret != 1) {
