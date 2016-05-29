@@ -307,9 +307,48 @@ static int client_send_metadata_to_server()
  */ 
 static int client_remote_memory_ops() 
 {
-	rdma_error("This function is not yet implemented \n");
-	/* Implement this function */
-	return -ENOSYS;
+    client_send_sge.length  = client_src_mr->length;
+    client_send_sge.lkey    = client_src_mr->lkey;
+    client_send_sge.addr    = (uint64_t)client_src_mr->addr;
+
+    bzero(&client_send_wr, sizeof(client_send_wr));
+    client_send_wr.num_sge             = 1;
+    client_send_wr.sg_list             = &client_send_sge;
+    client_send_wr.opcode              = IBV_WR_RDMA_WRITE;
+    client_send_wr.wr.rdma.remote_addr = server_metadata_attr.address;
+    client_send_wr.wr.rdma.rkey        = server_metadata_attr.stag.local_stag;
+
+    int fail = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
+    if(fail) {
+        rdma_error("RDMA Write failed.\n");
+        return -fail;
+    }
+
+    client_dst_mr = rdma_buffer_register(pd, dst, strlen(src), IBV_ACCESS_LOCAL_WRITE);
+    if(!client_dst_mr) {
+        rdma_error("Could not register destination buffer.\n");
+        return -1;
+    }
+
+    client_send_sge.length  = client_dst_mr->length;
+    client_send_sge.lkey    = client_dst_mr->lkey;
+    client_send_sge.addr    = (uint64_t)client_dst_mr->addr;
+
+    bzero(&client_send_wr, sizeof(client_send_wr));
+    client_send_wr.num_sge             = 1;
+    client_send_wr.sg_list             = &client_send_sge;
+    client_send_wr.opcode              = IBV_WR_RDMA_READ;
+    client_send_wr.wr.rdma.remote_addr = server_metadata_attr.address;
+    client_send_wr.wr.rdma.rkey        = server_metadata_attr.stag.local_stag;
+
+    fail = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
+    if(fail) {
+        rdma_error("RDMA Read failed.\n");
+        return -fail;
+    }
+
+    debug("Dst: %s\n", dst);
+    return 0;
 }
 
 /* This function disconnects the RDMA connection from the server and cleans up 
